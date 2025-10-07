@@ -7,7 +7,7 @@ AI DJ with Model is a small toolkit for analysing music files, training a song r
 - Rich musical descriptors (rhythm, tonal, dynamics, mood, instrumentation, embeddings).
 - Optional power-ups when Essentia, madmom, pyloudnorm, OpenL3, or Spleeter are installed.
 - Recommender bundle saved as `models/recommender.joblib` for reuse in the UI.
-- Streamlit front end that previews two decks, clusters tracks, and renders mixes.
+- Streamlit front end with two compact decks, central mix controls, and instant mix preview.
 
 ## Repository Layout
 - `feauture_extraction.py` – CLI and library for generating detailed JSON reports from audio files.
@@ -26,7 +26,7 @@ AI DJ with Model is a small toolkit for analysing music files, training a song r
 You can install the basics with:
 
 ```bash
-pip install numpy librosa pandas joblib scikit-learn streamlit soundfile pydub
+pip install numpy librosa pandas joblib scikit-learn streamlit soundfile pydub mutagen
 ```
 
 Add any of the optional libraries above if you plan to use their specific capabilities.
@@ -43,10 +43,11 @@ Add any of the optional libraries above if you plan to use their specific capabi
    source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
    ```
 3. **Install dependencies** using the `pip install` command shown above (add optional packages as needed).
-4. **Analyse a track** to produce a JSON report:
+4. **Analyse a track** to produce a JSON report (saved next to the audio by default):
    ```bash
-   python feauture_extraction.py path/to/song.mp3 --output reports/song.json
+   python feauture_extraction.py path/to/song.mp3
    ```
+   Add `--output -` if you want the JSON printed to the terminal instead of written to disk.
 5. **Train the recommender** on all JSON reports:
    ```bash
    python train_recommender.py --reports reports --model-out models/recommender.joblib
@@ -55,25 +56,39 @@ Add any of the optional libraries above if you plan to use their specific capabi
    ```bash
    streamlit run dj_interface.py
    ```
-   The app will open in your browser, allowing you to browse tracks, see recommendations, and generate quick mixes.
+   The app will open in your browser, allowing you to load two decks, configure the mix, and generate a transition.
 
 ## Detailed Usage
 
 ### 1. Audio Feature Extraction
 `feauture_extraction.py` can process individual files or entire folders. Useful flags:
 
-- `--output <path>`: write the analysis to a JSON file. If omitted, results print to stdout.
+- `--output <path>`: write the analysis to a specific location. Omit the flag to save alongside the audio, or pass `--output -` to print to stdout.
 - `--batch-folder <folder>`: analyse every file matching `--batch-pattern` (defaults to `*.mp3`).
 - `--batch-pattern "**/*.mp3"`: recursively scan subfolders when running in batch mode.
 - `--enable-stems`: run Spleeter stem separation (requires Spleeter and FFmpeg).
 - `--embeddings`: compute OpenL3 embeddings if the library is installed.
 - `--disable-essentia` or `--disable-madmom`: skip those heavy optional dependencies even if available.
+- `--overwrite`: recompute analysis even when the JSON already exists next to the file.
+
+#### Single-file extraction
+
+Generate or refresh analysis for one track (JSON saved alongside the audio):
+
+```bash
+python feauture_extraction.py /mnt/nvme/Genie_lib/Music_Data/song.mp3
+```
+
+To force a refresh, append `--overwrite`. To keep the output in the console, use `--output -`.
 
 Example batch run that mirrors the defaults used by the Streamlit app:
 
 ```bash
-python feauture_extraction.py --batch-folder Music_Data --batch-pattern "**/*.mp3" --batch-out reports
+python feauture_extraction.py --batch-folder /mnt/nvme/Genie_lib --batch-pattern "**/*.mp3"
 ```
+
+JSON files will be written next to their source audio. Provide `--batch-out reports` to collect them elsewhere, and add `--overwrite` to refresh existing analyses.
+- The quoted `"**/*.mp3"` pattern recursively scans every subfolder beneath the chosen library root so you can point to a top-level music directory.
 
 Each JSON file records metadata, rhythm, tonal, dynamics, spatial, mood, instrumentation, and optional embeddings/stem statistics. The tests in `tests/test_feauture_extraction.py` illustrate the expected structure.
 
@@ -96,7 +111,9 @@ Run the script whenever you add new analysis files so the Streamlit app can pick
 Start the UI with `streamlit run dj_interface.py`. Important behaviours:
 
 - The app loads the recommender bundle (default `models/recommender.joblib`) and caches it for quicker reloads.
-- It scans the `reports` directory for analysis JSON files and filters them to match `--allowed-folder` values. Without `--allowed-folder`, it uses defaults under `Music_Data` if present.
+- It scans the `reports` directory for analysis JSON files and filters them to match `--allowed-folder` values. If no reports are found there, it will search every allowed folder for JSONs stored alongside your audio.
+- Deck A and Deck B sit on the left/right columns with quick-pick dropdowns and uploaders, while the mix panel stays centered for a clean single-screen workflow.
+- Tracks without a matching JSON analysis are ignored, so make sure you have run the feature extractor on any music you want available in the interface.
 - Deck search boxes match on file stem or path; the app prevents using the same track on both decks.
 - When `auto_recommend` is enabled (controlled via `instructions.json`), the UI lists nearby tracks from the training metadata.
 - The mix renderer prefers pydub + FFmpeg. If unavailable, it falls back to a numpy/librosa crossfade implementation exporting WAV.

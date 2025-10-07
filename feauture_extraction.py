@@ -37,6 +37,14 @@ import numpy as np
 import librosa
 
 
+try:  # pragma: no cover - optional dependency
+    import audioread  # type: ignore
+    _AUDIOREAD_AVAILABLE = True
+except ImportError:
+    audioread = None
+    _AUDIOREAD_AVAILABLE = False
+
+
 DEFAULT_AUDIO_ROOT = Path("/Volumes/T7/AI_DJ/Music_Data")
 
 try:
@@ -86,6 +94,10 @@ try:  # pragma: no cover - optional dependency
 except ImportError:
     Separator = None
     _SPLEETER_AVAILABLE = False
+
+
+class AudioLoadingError(RuntimeError):
+    """Raised when an audio file cannot be decoded into a waveform."""
 
 
 @dataclass
@@ -165,7 +177,21 @@ def _spectral_flux_onset(y: np.ndarray, hop_length: int) -> np.ndarray:
 def load_audio(path: Path, config: FeatureConfig) -> Tuple[np.ndarray, np.ndarray, int]:
     """Load mono and stereo representations of the audio signal."""
 
-    y_stereo, sr = librosa.load(path, sr=config.sample_rate, mono=False)
+    try:
+        y_stereo, sr = librosa.load(path, sr=config.sample_rate, mono=False)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:  # pragma: no cover - depends on runtime environment
+        message = f"Unable to load audio from {path}: {exc}"
+        hints = []
+        if _SOUNDFILE_AVAILABLE and isinstance(exc, sf.LibsndfileError):
+            hints.append("Libsndfile could not decode the file; ensure it is a valid audio asset or convert it to WAV/FLAC.")
+        if _AUDIOREAD_AVAILABLE and isinstance(exc, audioread.NoBackendError):
+            hints.append("No MP3 decoding backend is available. Install FFmpeg/GStreamer (e.g. `sudo apt-get install ffmpeg`) to enable MP3 decoding.")
+        if hints:
+            message = f"{message} {' '.join(hints)}"
+        raise AudioLoadingError(message) from exc
+
     if y_stereo.ndim == 1:
         y_mono = y_stereo
         y_stereo = np.expand_dims(y_stereo, axis=0)
@@ -897,8 +923,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch-out",
         type=Path,
-        default=Path("reports"),
-        help="Output directory for batch processing (default: reports).",
+        default=None,
+        help="Optional directory for batch outputs (default: alongside each audio file).",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Recompute analysis even if the JSON output already exists.",
     )
     args = parser.parse_args()
 
@@ -914,19 +945,41 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def _run_single(path: Path, config: FeatureConfig, output: Optional[Path]) -> None:
+def _destination_for(path: Path, output: Optional[Path]) -> Path:
+    if output and str(output) == "-":
+        raise ValueError("stdout destination should be handled before calling _destination_for")
+    return output if output else path.with_suffix(".json")
+
+
+def _run_single(path: Path, config: FeatureConfig, output: Optional[Path], overwrite: bool) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Audio file not found: {path}")
 
+    if output and str(output) == "-":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = analyze_audio(path, config)
+        print(json.dumps(result, indent=2))
+        return
+
+    destination = _destination_for(path, output)
+    if destination.exists() and not overwrite:
+        print(f"Skipping {path} (analysis already exists at {destination}; use --overwrite to recompute)")
+        return
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = analyze_audio(path, config)
-
-    if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, indent=2))
-    else:
-        print(json.dumps(result, indent=2))
+        try:
+            result = analyze_audio(path, config)
+        except AudioLoadingError as exc:
+            message = f"Failed to analyze {path}: {exc}"
+            print(message)
+            error_payload = {"metadata": {"path": str(path)}, "error": {"type": "AudioLoadingError", "detail": str(exc)}}
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(error_payload, indent=2))
+            return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(result, indent=2))
 
 
 def _run_batch(args: argparse.Namespace, config: FeatureConfig) -> None:
@@ -941,13 +994,19 @@ def _run_batch(args: argparse.Namespace, config: FeatureConfig) -> None:
         if path.name.startswith("._"):
             print(f"Skipping resource-fork placeholder {path}")
             continue
-        try:
-            relative_path = path.relative_to(folder)
-        except ValueError:
-            relative_path = Path(path.name)
-        output_path = out_dir / relative_path.with_suffix(".json")
+        if out_dir is not None:
+            try:
+                relative_path = path.relative_to(folder)
+            except ValueError:
+                relative_path = Path(path.name)
+            output_path = out_dir / relative_path.with_suffix(".json")
+        else:
+            output_path = path.with_suffix(".json")
+        if output_path.exists() and not args.overwrite:
+            print(f"Skipping {path} (analysis already exists at {output_path}; use --overwrite to recompute)")
+            continue
         print(f"Analyzing {path} -> {output_path}")
-        _run_single(path, config, output_path)
+        _run_single(path, config, output_path, args.overwrite)
 
 
 def main() -> None:
@@ -967,7 +1026,7 @@ def main() -> None:
         _run_batch(args, config)
         return
 
-    _run_single(args.audio, config, args.output)
+    _run_single(args.audio, config, args.output, args.overwrite)
 
 
 if __name__ == "__main__":
